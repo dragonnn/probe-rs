@@ -11,7 +11,7 @@ use crate::{
         ap::{memory_ap::MemoryApType, AccessPortType, ApAccess, GenericAp, IDR},
         communication_interface::{FlushableArmAccess, Initialized},
         core::armv8m::{Aircr, Demcr, Dhcsr},
-        dp::{Abort, Ctrl, DpAccess, Select, DPIDR},
+        dp::{Abort, Ctrl, DebugPortError, DpAccess, Select, DPIDR},
         memory::ArmMemoryInterface,
         sequences::ArmDebugSequence,
         ArmCommunicationInterface, ArmError, DapAccess, DpAddress, FullyQualifiedApAddress, Pins,
@@ -79,6 +79,86 @@ fn debug_port_start(
     }
 
     Ok(powered_down)
+}
+
+/// The sequence handle for the OL23D0 family.
+#[derive(Debug)]
+pub struct OL23D0(());
+impl OL23D0 {
+    /// Create a sequence handle for the OL23D0.
+    pub fn create() -> Arc<dyn ArmDebugSequence> {
+        Arc::new(Self(()))
+    }
+}
+
+impl ArmDebugSequence for OL23D0 {
+    fn debug_port_start(
+        &self,
+        interface: &mut ArmCommunicationInterface<Initialized>,
+        dp: DpAddress,
+    ) -> Result<(), ArmError> {
+        // Clear all errors.
+        // CMSIS says this is only necessary to do inside the `if powered_down`, but
+        // without it here, nRF52840 faults in the next access.
+        let mut abort = Abort(0);
+        abort.set_dapabort(true);
+        abort.set_orunerrclr(true);
+        abort.set_wderrclr(true);
+        abort.set_stkerrclr(true);
+        abort.set_stkcmpclr(true);
+        interface.write_dp_register(dp, abort)?;
+
+        interface.write_dp_register(dp, Select(0))?;
+
+        let ctrl = interface.read_dp_register::<Ctrl>(dp)?;
+
+        let powered_down = !(ctrl.csyspwrupack() && ctrl.cdbgpwrupack());
+
+        if powered_down {
+            tracing::info!("Debug port {dp:x?} is powered down, powering up");
+            let mut ctrl = Ctrl(0);
+            ctrl.set_cdbgpwrupreq(true);
+            ctrl.set_csyspwrupreq(true);
+            interface.write_dp_register(dp, ctrl)?;
+
+            let start = Instant::now();
+            loop {
+                let ctrl = interface.read_dp_register::<Ctrl>(dp)?;
+                if ctrl.csyspwrupack() && ctrl.cdbgpwrupack() {
+                    break;
+                }
+                if start.elapsed() >= Duration::from_secs(1) {
+                    return Err(ArmError::Timeout);
+                }
+            }
+
+            // TODO: Handle JTAG Specific part
+
+            // TODO: Only run the following code when the SWD protocol is used
+
+            // Init AP Transfer Mode, Transaction Counter, and Lane Mask (Normal Transfer Mode, Include all Byte Lanes)
+            let mut ctrl = Ctrl(0);
+            ctrl.set_cdbgpwrupreq(true);
+            ctrl.set_csyspwrupreq(true);
+            ctrl.set_mask_lane(0b1111);
+            interface.write_dp_register(dp, ctrl)?;
+
+            let ctrl_reg: Ctrl = interface.read_dp_register(dp)?;
+            if !(ctrl_reg.csyspwrupack() && ctrl_reg.cdbgpwrupack()) {
+                tracing::error!("Debug power request failed");
+                return Err(DebugPortError::TargetPowerUpFailed.into());
+            }
+
+            // According to CMSIS docs, here's where we would clear errors
+            // in ABORT, but we do that above instead.
+        }
+
+        Ok(())
+    }
+
+    // fn allowed_access_ports(&self) -> Vec<u8> {
+    //     vec![0]
+    // }
 }
 
 /// The sequence handle for the LPC55Sxx family.

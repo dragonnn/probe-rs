@@ -10,6 +10,7 @@ use crate::{
             nxp_armv8m::{
                 LPC55Sxx, MIMXRT5xxS,
                 MIMXRTFamily::{MIMXRT5, MIMXRT6},
+                OL23D0,
             },
         },
         Vendor,
@@ -34,6 +35,8 @@ impl Vendor for Nxp {
             DebugSequence::Arm(MIMXRT5xxS::create(MIMXRT6))
         } else if chip.name.starts_with("LPC55S") {
             DebugSequence::Arm(LPC55Sxx::create())
+        } else if chip.name.starts_with("OL23D0") {
+            DebugSequence::Arm(OL23D0::create())
         } else {
             return None;
         };
